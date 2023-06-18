@@ -1,0 +1,48 @@
+#!/usr/bin/env python
+from argparse import ArgumentParser
+from contextlib import closing
+from datetime import timedelta
+import readline
+import sqlite3
+import whisper
+
+def seconds2td(seconds: float) -> timedelta:
+	return timedelta(seconds=seconds)
+
+parser = ArgumentParser('whisper-tui', description='quickly generate and search transcriptions of audio')
+parser.add_argument('--model', default='tiny.en', choices=whisper.available_models(), help='model to pick for transcription')
+parser.add_argument('audio', help='audio to transcribe')
+
+args = parser.parse_args()
+
+model = whisper.load_model(args.model)
+# verbose=False shows the progress bar: https://github.com/openai/whisper/discussions/850
+segments = model.transcribe(args.audio, verbose=False)['segments']
+
+with closing(sqlite3.connect(':memory:')) as conn:
+	conn.row_factory = sqlite3.Row
+	
+	# Create FTS table
+	# https://www.sqlite.org/fts5.html
+	conn.executescript("CREATE VIRTUAL TABLE segments USING fts5(start, end, text);")
+	
+	# Insert stuff
+	conn.executemany(
+		"INSERT INTO segments (start, end, text) values (:start, :end, :text)",
+		segments
+	)
+	conn.commit()
+
+	# Search
+	while True:
+		try:
+			query = input("> ")
+			cur = conn.cursor()
+			for segment in cur.execute("SELECT * FROM segments WHERE segments MATCH ? ORDER BY start LIMIT 5;", (query,)).fetchall():
+				print(f"{seconds2td(segment['start'])} - {seconds2td(segment['end'])}: {segment['text']}")
+		except KeyboardInterrupt:
+			print()
+			break
+		except Exception as e:
+			print(e)
+			pass
